@@ -2,7 +2,7 @@ name: EPD PDF Scraper 2025
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # Every 3 hours
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -26,8 +28,12 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git pull --rebase origin main
-          git add downloads/pdf/*
+          rm -rf .git/refs/ORIG_HEAD .git/refs/remotes/origin/HEAD
+          git remote prune origin
+          git fetch origin
+          git checkout main
+          git reset --hard origin/main
+          git add downloaded_pdfs/pdfs/* || true
           git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
           git push origin main
         env:

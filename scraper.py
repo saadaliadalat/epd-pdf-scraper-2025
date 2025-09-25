@@ -6,402 +6,367 @@ import random
 import sqlite3
 import time
 import csv
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urljoin, unquote
 import re
-from typing import List, Dict, Set
+from typing import List, Dict
 import aiohttp
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright
 from pypdf import PdfReader
 import aiosmtplib
 from email.message import EmailMessage
 import psutil
+import os
 
-class Config:
-    # Calculate dates dynamically
-    END_DATE = date.today()
-    START_DATE = END_DATE - timedelta(days=21)
-    
-    # Paths
-    DOWNLOAD_FOLDER = Path("downloads/pdf")
-    ERROR_FOLDER = Path("downloads/errors")
-    DB_FILE = "downloads.db"
-    CSV_FILE = "downloads.csv"
-    
-    # URLs and API
-    BASE_URL = "https://epd.punjab.gov.pk"
-    
-    # Scraping settings
-    MAX_RETRIES = 3
-    REQUEST_TIMEOUT = 45
-    DELAY_RANGE = (0.2, 0.5)
-    HEADLESS = True
-    DATE_FORMAT = "%m/%d/%Y"
-    MAX_CONCURRENT = 5
-    BANDWIDTH_THRESHOLD = 20
-    
-    # Email settings
-    EMAIL_NOTIFICATIONS = False
-    EMAIL_SENDER = "your_email@example.com"
-    EMAIL_RECEIVER = "your_email@example.com"
-    SMTP_SERVER = "smtp.example.com"
-    SMTP_PORT = 587
-    SMTP_USERNAME = "your_username"
-    SMTP_PASSWORD = "your_password"
+# ========== CONFIG ==========
+START_DATE = date(2025, 9, 25)
+END_DATE = date.today()
+DOWNLOAD_FOLDER = Path("downloaded_pdfs/pdfs")
+ERROR_FOLDER = Path("downloaded_pdfs/errors")
+DB_FILE = "downloads2025.db"
+CSV_FILE = "downloads2025.csv"
+BASE_URL = "https://epd.punjab.gov.pk"
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 45
+DELAY_RANGE = (0.2, 0.5)
+HEADLESS = True
+DATE_FORMAT = "%m/%d/%Y"
+MAX_CONCURRENT = 5
+EMAIL_NOTIFICATIONS = False
+EMAIL_SENDER = "your_email@example.com"
+EMAIL_RECEIVER = "your_email@example.com"
+SMTP_SERVER = "smtp.example.com"
+SMTP_PORT = 587
+SMTP_USERNAME = "your_username"
+SMTP_PASSWORD = "your_password"
+BANDWIDTH_THRESHOLD = 20
+# ============================
 
-class PDFScraper:
-    def __init__(self):
-        self._setup_logging()
-        self._create_directories()
-        self._init_db()
-        self._init_csv()
-        self.processed_dates = self._get_processed_dates()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('scraper.log'), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
-    def _setup_logging(self):
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('scraper.log'),
-                logging.StreamHandler()
-            ]
+DOWNLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+ERROR_FOLDER.mkdir(parents=True, exist_ok=True)
+
+def sanitize_filename(filename: str) -> str:
+    invalid_chars = r'[<>:"/\\|?*=&]'
+    filename = re.sub(invalid_chars, '_', filename).strip()
+    return re.sub(r'\s+', '_', filename)
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS downloads (
+            date TEXT,
+            filename TEXT,
+            url TEXT,
+            status TEXT,
+            file_size INTEGER,
+            timestamp TEXT,
+            PRIMARY KEY (date, filename)
         )
-        self.logger = logging.getLogger(__name__)
+    """)
+    conn.commit()
+    conn.close()
 
-    def _create_directories(self):
-        Config.DOWNLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
-        Config.ERROR_FOLDER.mkdir(parents=True, exist_ok=True)
+def init_csv():
+    if not Path(CSV_FILE).exists():
+        with open(CSV_FILE, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['date', 'filename', 'url', 'timestamp'])
 
-    def _init_db(self):
-        with sqlite3.connect(Config.DB_FILE) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS downloads (
-                    date TEXT,
-                    filename TEXT,
-                    url TEXT,
-                    status TEXT,
-                    file_size INTEGER,
-                    timestamp TEXT,
-                    PRIMARY KEY (date, filename)
-                )
-            """)
-
-    def _init_csv(self):
-        if not Path(Config.CSV_FILE).exists():
-            with open(Config.CSV_FILE, 'w', newline='') as f:
+def log_to_db(date_str: str, filename: str, url: str, status: str, file_size: int, timestamp: str):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO downloads VALUES (?, ?, ?, ?, ?, ?)",
+            (date_str, filename, url, status, file_size, timestamp)
+        )
+        conn.commit()
+        if status in ['SUCCESS', 'EXISTS'] and filename:
+            with open(CSV_FILE, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['date', 'filename', 'url', 'timestamp'])
+                writer.writerow([date_str, filename, url, timestamp])
+    except Exception as e:
+        logger.error(f"DB/CSV log failed for {date_str}/{filename}: {e}")
+    finally:
+        conn.close()
 
-    def _get_processed_dates(self) -> Set[str]:
+def get_processed_dates() -> set:
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT date FROM downloads")
+        dates = {row[0] for row in cursor.fetchall()}
+        return dates
+    except Exception as e:
+        logger.error(f"Failed to get processed dates: {e}")
+        return set()
+    finally:
+        conn.close()
+
+async def send_email_alert(subject: str, body: str):
+    if not EMAIL_NOTIFICATIONS:
+        return
+    try:
+        email = EmailMessage()
+        email['Subject'] = subject
+        email['From'] = EMAIL_SENDER
+        email['To'] = EMAIL_RECEIVER
+        email.set_content(body)
+        await aiosmtplib.send(
+            email,
+            hostname=SMTP_SERVER,
+            port=SMTP_PORT,
+            username=SMTP_USERNAME,
+            password=SMTP_PASSWORD,
+            use_tls=True
+        )
+        logger.info("Email alert sent")
+    except Exception as e:
+        logger.error(f"Email alert failed: {e}")
+
+async def check_bandwidth() -> float:
+    try:
+        net_io = psutil.net_io_counters()
+        bytes_start = net_io.bytes_recv
+        await asyncio.sleep(1)
+        net_io = psutil.net_io_counters()
+        bytes_end = net_io.bytes_recv
+        mbps = ((bytes_end - bytes_start) * 8 / 1_000_000)
+        return mbps
+    except Exception:
+        return float('inf')
+
+async def download_file(session: aiohttp.ClientSession, url: str, filename: str, date_str: str) -> bool:
+    sanitized_filename = sanitize_filename(filename)
+    filepath = DOWNLOAD_FOLDER / sanitized_filename
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    if filepath.exists() and filepath.stat().st_size > 0:
         try:
-            with sqlite3.connect(Config.DB_FILE) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT DISTINCT date FROM downloads")
-                return {row[0] for row in cursor.fetchall()}
+            PdfReader(filepath)
+            log_to_db(date_str, sanitized_filename, url, 'EXISTS', filepath.stat().st_size, timestamp)
+            return True
+        except:
+            filepath.unlink()
+            logger.warning(f"Removed corrupt file: {sanitized_filename}")
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            bandwidth = await check_bandwidth()
+            if bandwidth < BANDWIDTH_THRESHOLD:
+                logger.warning(f"Low bandwidth ({bandwidth:.2f} Mbps), throttling...")
+                await asyncio.sleep(2)
+            headers = {
+                'User-Agent': random.choice([
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+                ]),
+                'Accept': 'application/pdf',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': f'{BASE_URL}/aqi'
+            }
+            async with session.get(url, headers=headers, timeout=REQUEST_TIMEOUT) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    filepath.write_bytes(content)
+                    size = filepath.stat().st_size
+                    try:
+                        PdfReader(filepath)
+                        log_to_db(date_str, sanitized_filename, url, 'SUCCESS', size, timestamp)
+                        return True
+                    except:
+                        filepath.unlink()
+                        log_to_db(date_str, sanitized_filename, url, 'INVALID_PDF', 0, timestamp)
+                        return False
+                elif resp.status == 429:
+                    logger.warning(f"Rate limit for {sanitized_filename}, retrying...")
+                    await asyncio.sleep(20 + random.uniform(0, 5))
+                    continue
+                else:
+                    raise Exception(f"HTTP {resp.status}")
         except Exception as e:
-            self.logger.error(f"Failed to get processed dates: {e}")
-            return set()
-
-    @staticmethod
-    def sanitize_filename(filename: str) -> str:
-        invalid_chars = r'[<>:"/\\|?*=&]'
-        filename = re.sub(invalid_chars, '_', filename).strip()
-        return re.sub(r'\s+', '_', filename)
-
-    async def check_bandwidth(self) -> float:
-        try:
-            net_io = psutil.net_io_counters()
-            bytes_start = net_io.bytes_recv
-            await asyncio.sleep(1)
-            net_io = psutil.net_io_counters()
-            bytes_end = net_io.bytes_recv
-            return ((bytes_end - bytes_start) * 8 / 1_000_000)
-        except Exception:
-            return float('inf')
-
-    async def send_email_alert(self, subject: str, body: str):
-        if not Config.EMAIL_NOTIFICATIONS:
-            return
-        
-        try:
-            email = EmailMessage()
-            email['Subject'] = subject
-            email['From'] = Config.EMAIL_SENDER
-            email['To'] = Config.EMAIL_RECEIVER
-            email.set_content(body)
-            
-            await aiosmtplib.send(
-                email,
-                hostname=Config.SMTP_SERVER,
-                port=Config.SMTP_PORT,
-                username=Config.SMTP_USERNAME,
-                password=Config.SMTP_PASSWORD,
-                use_tls=True
-            )
-            self.logger.info("Email alert sent")
-        except Exception as e:
-            self.logger.error(f"Email alert failed: {e}")
-
-    def log_to_db(self, date_str: str, filename: str, url: str, 
-                  status: str, file_size: int, timestamp: str):
-        try:
-            with sqlite3.connect(Config.DB_FILE) as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO downloads VALUES (?, ?, ?, ?, ?, ?)",
-                    (date_str, filename, url, status, file_size, timestamp)
+            logger.error(f"Download attempt {attempt+1} failed for {sanitized_filename}: {e}")
+            if attempt == MAX_RETRIES - 1:
+                log_to_db(date_str, sanitized_filename, url, f'FAILED: {e}', 0, timestamp)
+                await send_email_alert(
+                    f"Download Failure: {date_str}",
+                    f"Failed to download {sanitized_filename} for {date_str}: {e}"
                 )
-                
-                if status in ['SUCCESS', 'EXISTS'] and filename:
-                    with open(Config.CSV_FILE, 'a', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow([date_str, filename, url, timestamp])
-        except Exception as e:
-            self.logger.error(f"DB/CSV log failed for {date_str}/{filename}: {e}")
+                return False
+            await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+    return False
 
-    async def download_file(self, session: aiohttp.ClientSession, 
-                          url: str, filename: str, date_str: str) -> bool:
-        sanitized_filename = self.sanitize_filename(filename)
-        filepath = Config.DOWNLOAD_FOLDER / sanitized_filename
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def find_pdf_links(html: str) -> List[Dict[str, str]]:
+    pdf_links = []
+    patterns = [
+        r'<a[^>]*href="(/system/files[^"]*\.pdf)"[^>]*>',
+        r'<a[^>]*href="([^"]*\.pdf)"[^>]*>'
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, html, re.IGNORECASE)
+        for match in matches:
+            filename = unquote(match.split('file=')[-1] if 'file=' in match else match.split('/')[-1])
+            filename = sanitize_filename(filename)
+            full_url = urljoin(BASE_URL, match)
+            if full_url not in [link['url'] for link in pdf_links]:
+                pdf_links.append({'url': full_url, 'filename': filename})
+    return pdf_links[:1]
 
-        if filepath.exists() and filepath.stat().st_size > 0:
-            try:
-                PdfReader(filepath)
-                self.log_to_db(date_str, sanitized_filename, url, 'EXISTS', 
-                              filepath.stat().st_size, timestamp)
-                return True
-            except:
-                filepath.unlink()
-                self.logger.warning(f"Removed corrupt file: {sanitized_filename}")
-
-        for attempt in range(Config.MAX_RETRIES):
-            try:
-                bandwidth = await self.check_bandwidth()
-                if bandwidth < Config.BANDWIDTH_THRESHOLD:
-                    self.logger.warning(f"Low bandwidth ({bandwidth:.2f} Mbps)")
-                    await asyncio.sleep(2)
-
-                headers = {
-                    'User-Agent': random.choice([
-                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
-                    ]),
-                    'Accept': 'application/pdf',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Referer': f'{Config.BASE_URL}/aqi'
-                }
-
-                async with session.get(url, headers=headers, 
-                                     timeout=Config.REQUEST_TIMEOUT) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        filepath.write_bytes(content)
-                        
-                        try:
-                            PdfReader(filepath)
-                            self.log_to_db(date_str, sanitized_filename, url, 
-                                         'SUCCESS', filepath.stat().st_size, 
-                                         timestamp)
-                            return True
-                        except:
-                            filepath.unlink()
-                            self.log_to_db(date_str, sanitized_filename, url, 
-                                         'INVALID_PDF', 0, timestamp)
-                            return False
-                    
-                    elif resp.status == 429:
-                        self.logger.warning(f"Rate limit hit, retrying...")
-                        await asyncio.sleep(20 + random.uniform(0, 5))
-                        continue
-                    else:
-                        raise Exception(f"HTTP {resp.status}")
-
-            except Exception as e:
-                self.logger.error(
-                    f"Download attempt {attempt+1} failed for {sanitized_filename}: {e}"
-                )
-                if attempt == Config.MAX_RETRIES - 1:
-                    self.log_to_db(date_str, sanitized_filename, url, 
-                                 f'FAILED: {e}', 0, timestamp)
-                    await self.send_email_alert(
-                        f"Download Failure: {date_str}",
-                        f"Failed to download {sanitized_filename}: {e}"
-                    )
-                    return False
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
-        
-        return False
-
-    @staticmethod
-    def find_pdf_links(html: str) -> List[Dict[str, str]]:
-        pdf_links = []
-        patterns = [
-            r'<a[^>]*href="(/system/files[^"]*\.pdf)"[^>]*>',
-            r'<a[^>]*href="([^"]*\.pdf)"[^>]*>'
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for match in matches:
-                filename = unquote(match.split('file=')[-1] 
-                                 if 'file=' in match else match.split('/')[-1])
-                filename = PDFScraper.sanitize_filename(filename)
-                full_url = urljoin(Config.BASE_URL, match)
-                if full_url not in [link['url'] for link in pdf_links]:
-                    pdf_links.append({'url': full_url, 'filename': filename})
-        
-        return pdf_links[:1]  # Return only first PDF link
-
-    async def process_date(self, page: Page, date_str: str, 
-                          session: aiohttp.ClientSession) -> int:
-        if date_str in self.processed_dates:
-            self.logger.info(f"Skipping {date_str} (already processed)")
-            return 0
-
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        for attempt in range(Config.MAX_RETRIES):
-            try:
-                await page.fill("#edit-field-aqr-date-value", date_str)
-                await page.click("#edit-submit-air-quality-reports-block-")
-                await page.wait_for_selector("a[href*='.pdf']", timeout=10000)
-                
-                html = await page.content()
-                pdf_links = self.find_pdf_links(html)
-                downloaded = 0
-                
-                for link in pdf_links:
-                    if await self.download_file(session, link['url'], 
-                                             link['filename'], date_str):
-                        downloaded += 1
-                
-                if not pdf_links:
-                    self.log_to_db(date_str, '', '', 'NO_PDF', 0, timestamp)
-                
-                self.processed_dates.add(date_str)
-                self.logger.info(f"Processed {date_str}: {downloaded} PDFs")
-                return downloaded
-
-            except Exception as e:
-                self.logger.error(f"Attempt {attempt+1} failed for {date_str}: {e}")
-                if attempt == Config.MAX_RETRIES - 1:
-                    self.log_to_db(date_str, '', '', f'ERROR: {e}', 0, timestamp)
-                    await page.screenshot(
-                        path=Config.ERROR_FOLDER / 
-                        f"error_{date_str.replace('/', '_')}.png"
-                    )
-                    with open(Config.ERROR_FOLDER / 
-                             f"debug_{date_str.replace('/', '_')}.html", 
-                             'w', encoding='utf-8') as f:
-                        f.write(html if 'html' in locals() else 'No content')
-                    await self.send_email_alert(
-                        f"Scraper Error: {date_str}",
-                        f"Failed to process {date_str}: {e}"
-                    )
-                    return 0
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
-        
+async def process_date(page, date_str: str, session: aiohttp.ClientSession, processed_dates: set) -> int:
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    if date_str in processed_dates:
+        logger.info(f"Skipping {date_str} (already processed)")
         return 0
 
-    async def scrape(self):
-        start_time = time.time()
-        total_downloaded = 0
-        dates_to_process = [
-            Config.START_DATE + timedelta(days=x) 
-            for x in range((Config.END_DATE - Config.START_DATE).days + 1)
-        ]
+    for attempt in range(MAX_RETRIES):
+        try:
+            await page.fill("#edit-field-aqr-date-value", date_str)
+            await page.click("#edit-submit-air-quality-reports-block-")
+            await page.wait_for_selector("a[href*='.pdf']", timeout=10000)
+            html = await page.content()
+            pdf_links = find_pdf_links(html)
+            downloaded = 0
+            for link in pdf_links:
+                if await download_file(session, link['url'], link['filename'], date_str):
+                    downloaded += 1
+            if not pdf_links:
+                log_to_db(date_str, '', '', 'NO_PDF', 0, timestamp)
+            processed_dates.add(date_str)
+            logger.info(f"Processed {date_str}: {downloaded} PDFs")
+            return downloaded
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} failed for {date_str}: {e}")
+            if attempt == MAX_RETRIES - 1:
+                log_to_db(date_str, '', '', f'ERROR: {e}', 0, timestamp)
+                await page.screenshot(path=ERROR_FOLDER / f"error_{date_str.replace('/', '_')}.png")
+                with open(ERROR_FOLDER / f"debug_{date_str.replace('/', '_')}.html", 'w', encoding='utf-8') as f:
+                    f.write(html if 'html' in locals() else 'No content')
+                await send_email_alert(
+                    f"Scraper Error: {date_str}",
+                    f"Failed to process {date_str}: {e}"
+                )
+                return 0
+            await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+    return 0
 
+async def scrape_historical(start_date: date = START_DATE, end_date: date = END_DATE, max_attempts: int = 3):
+    init_db()
+    init_csv()
+    all_dates = [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]
+    
+    async def process_batch(batch: List[date], processed_dates: set):
+        total_downloaded = 0
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=Config.HEADLESS,
-                args=['--no-sandbox', '--disable-blink-features=AutomationControlled']
-            )
-            
+            browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox', '--disable-blink-features=AutomationControlled'])
             context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                user_agent=random.choice([
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
+                ]),
                 viewport={'width': 1280, 'height': 720},
                 bypass_csp=True
             )
-
             async with aiohttp.ClientSession() as session:
-                for current_date in dates_to_process:
-                    date_str = current_date.strftime(Config.DATE_FORMAT)
+                for current_date in batch:
+                    date_str = current_date.strftime(DATE_FORMAT)
+                    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
                     page = await context.new_page()
-                    
                     try:
-                        await page.goto(
-                            f"{Config.BASE_URL}/aqi",
-                            wait_until="domcontentloaded",
-                            timeout=Config.REQUEST_TIMEOUT * 1000
-                        )
-                        downloaded = await self.process_date(
-                            page, date_str, session
-                        )
+                        for attempt in range(MAX_RETRIES):
+                            try:
+                                logger.info(f"Navigating to {BASE_URL}/aqi for {date_str}, attempt {attempt+1}")
+                                await page.goto(BASE_URL + "/aqi", wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
+                                break
+                            except Exception as e:
+                                logger.error(f"Navigation failed for {date_str}: {e}")
+                                if attempt == MAX_RETRIES - 1:
+                                    log_to_db(date_str, '', '', f'NAVIGATION_ERROR: {e}', 0, timestamp)
+                                    await page.screenshot(path=ERROR_FOLDER / f"nav_error_{date_str.replace('/', '_')}.png")
+                                    await send_email_alert(
+                                        f"Navigation Error: {date_str}",
+                                        f"Failed to navigate to {BASE_URL}/aqi for {date_str}: {e}"
+                                    )
+                                    break
+                                await asyncio.sleep(2 ** attempt + random.uniform(0, 0.5))
+                        else:
+                            continue
+
+                        downloaded = await process_date(page, date_str, session, processed_dates)
                         total_downloaded += downloaded
-                    
                     except Exception as e:
-                        self.logger.error(f"Error processing {date_str}: {e}")
-                    
+                        logger.error(f"Unexpected error for {date_str}: {e}")
+                        log_to_db(date_str, '', '', f'UNEXPECTED_ERROR: {e}', 0, timestamp)
                     finally:
                         await page.close()
-                        await asyncio.sleep(
-                            random.uniform(*Config.DELAY_RANGE)
-                        )
-
+                        await asyncio.sleep(random.uniform(*DELAY_RANGE))
             await browser.close()
-
-        # Generate summary
-        self._generate_summary(total_downloaded, start_time)
         return total_downloaded
 
-    def _generate_summary(self, total_downloaded: int, start_time: float):
-        with sqlite3.connect(Config.DB_FILE) as conn:
-            cursor = conn.cursor()
-            successful = cursor.execute(
-                "SELECT COUNT(*) FROM downloads WHERE status IN ('SUCCESS', 'EXISTS')"
-            ).fetchone()[0]
-            no_pdf = cursor.execute(
-                "SELECT COUNT(*) FROM downloads WHERE status = 'NO_PDF'"
-            ).fetchone()[0]
-            errors = cursor.execute(
-                """SELECT COUNT(*) FROM downloads 
-                   WHERE status LIKE 'ERROR%' 
-                   OR status LIKE 'FAILED%'"""
-            ).fetchone()[0]
+    total_downloaded = 0
+    processed_dates = get_processed_dates()
+    for attempt in range(max_attempts):
+        dates = [d for d in all_dates if d.strftime(DATE_FORMAT) not in processed_dates]
+        if not dates:
+            logger.info("All dates processed")
+            break
 
-        all_dates = [
-            Config.START_DATE + timedelta(days=x) 
-            for x in range((Config.END_DATE - Config.START_DATE).days + 1)
-        ]
-        completion_rate = round(
-            len(self.processed_dates) / len(all_dates) * 100, 2
-        )
-        missing_dates = [
-            d.strftime(Config.DATE_FORMAT) 
-            for d in all_dates 
-            if d.strftime(Config.DATE_FORMAT) not in self.processed_dates
-        ]
+        logger.info(f"Attempt {attempt + 1}/{max_attempts}: Processing {len(dates)} dates")
+        batch_size = MAX_CONCURRENT
+        for i in range(0, len(dates), batch_size):
+            batch = dates[i:i + batch_size]
+            tasks = [process_batch([d], processed_dates) for d in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Batch failed for {batch[idx].strftime(DATE_FORMAT)}: {result}")
+                    log_to_db(batch[idx].strftime(DATE_FORMAT), '', '', f'BATCH_ERROR: {result}', 0, time.strftime('%Y-%m-%d %H:%M:%S'))
+                else:
+                    total_downloaded += result
+            await asyncio.sleep(0.5)
+        processed_dates = get_processed_dates()
 
-        summary = (
-            f"Summary:\n"
-            f"New PDFs downloaded: {total_downloaded}\n"
-            f"Successful downloads: {successful}\n"
-            f"No PDFs found: {no_pdf}\n"
-            f"Errors: {errors}\n"
-            f"Completion rate: {completion_rate}%\n"
-            f"Missing dates: {len(missing_dates)}\n"
-            f"Missing dates list: {', '.join(missing_dates) if missing_dates else 'None'}\n"
-            f"Time taken: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}"
-        )
-
-        print(summary)
-        with open("scraper_summary.txt", "w") as f:
-            f.write(summary)
+    logger.info(f"Scrape complete: {total_downloaded} PDFs downloaded")
+    return total_downloaded
 
 async def main():
-    scraper = PDFScraper()
-    await scraper.scrape()
+    start_time = time.time()
+    total = await scrape_historical()
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM downloads WHERE status IN ('SUCCESS', 'EXISTS')")
+    successful = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM downloads WHERE status = 'NO_PDF'")
+    no_pdf = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM downloads WHERE status LIKE 'ERROR%' OR status LIKE 'FAILED%' OR status LIKE 'NAVIGATION_ERROR%' OR status LIKE 'UNEXPECTED_ERROR%' OR status LIKE 'BATCH_ERROR%'")
+    errors = cursor.fetchone()[0]
+    conn.close()
+    all_dates = [START_DATE + timedelta(days=x) for x in range((END_DATE - START_DATE).days + 1)]
+    processed_dates = get_processed_dates()
+    completion_rate = round(len(processed_dates) / len(all_dates) * 100, 2)
+    missing_dates = [d.strftime(DATE_FORMAT) for d in all_dates if d.strftime(DATE_FORMAT) not in processed_dates]
+    summary = (
+        f"Summary: {total} new PDFs downloaded\n"
+        f"Successful downloads: {successful}\n"
+        f"No PDFs found: {no_pdf}\n"
+        f"Errors: {errors}\n"
+        f"Completion rate: {completion_rate:.2f}%\n"
+        f"Missing dates: {len(missing_dates)}\n"
+        f"Missing dates list: {', '.join(missing_dates) if missing_dates else 'None'}\n"
+        f"Time taken: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))}"
+    )
+    print(summary)
+    with open("scraper_summary.txt", "w") as f:
+        f.write(summary)
+    if errors > 0 and EMAIL_NOTIFICATIONS:
+        await send_email_alert("Scraper Summary", summary)
 
 if __name__ == "__main__":
     asyncio.run(main())
