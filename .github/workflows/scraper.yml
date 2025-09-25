@@ -27,7 +27,7 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git pull --rebase origin main
-          git add downloads2019/pdfs/*
+          git add downloads/pdf/*
           git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
           git push origin main
         env:
