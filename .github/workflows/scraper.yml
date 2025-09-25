@@ -5,6 +5,9 @@ on:
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write  # Enables push for GITHUB_TOKEN
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -22,23 +25,10 @@ jobs:
           playwright install --with-deps chromium
       - name: Run scraper
         run: python scraper.py
-        env:
-          EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
       - name: Check for PDFs and commit
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          rm -rf .git/refs/ORIG_HEAD .git/refs/remotes/origin/HEAD
-          git remote prune origin
-          git fetch origin
-          git checkout main
-          git reset --hard origin/main
-          if [ -d "downloaded_pdfs/pdfs" ] && [ "$(ls -A downloaded_pdfs/pdfs)" ]; then
-            git add downloaded_pdfs/pdfs/*
-            git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No changes to commit"
-          else
-            echo "No PDFs to commit"
-          fi
+          git add downloaded_pdfs/pdfs/* || true
+          git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
           git push origin main
-        env:
-          EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
