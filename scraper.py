@@ -20,8 +20,8 @@ import psutil
 import os
 
 # ========== CONFIG ==========
-START_DATE = date(2025, 9, 25)
-END_DATE = date.today()
+END_DATE = date.today()  # Current date: 2025-09-26
+START_DATE = END_DATE - timedelta(days=21)  # Last 21 days: 2025-09-05
 DOWNLOAD_FOLDER = Path("downloaded_pdfs/pdfs")
 ERROR_FOLDER = Path("downloaded_pdfs/errors")
 DB_FILE = "downloads2025.db"
@@ -228,8 +228,11 @@ async def process_date(page, date_str: str, session: aiohttp.ClientSession, proc
 
     for attempt in range(MAX_RETRIES):
         try:
+            logger.debug(f"Attempting to fill date {date_str}")
             await page.fill("#edit-field-aqr-date-value", date_str)
+            logger.debug("Clicking submit button")
             await page.click("#edit-submit-air-quality-reports-block-")
+            logger.debug("Waiting for PDF links")
             await page.wait_for_selector("a[href*='.pdf']", timeout=10000)
             html = await page.content()
             pdf_links = find_pdf_links(html)
@@ -265,6 +268,7 @@ async def scrape_historical(start_date: date = START_DATE, end_date: date = END_
     async def process_batch(batch: List[date], processed_dates: set):
         total_downloaded = 0
         async with async_playwright() as p:
+            logger.debug("Launching browser")
             browser = await p.chromium.launch(headless=HEADLESS, args=['--no-sandbox', '--disable-blink-features=AutomationControlled'])
             context = await browser.new_context(
                 user_agent=random.choice([
@@ -282,7 +286,7 @@ async def scrape_historical(start_date: date = START_DATE, end_date: date = END_
                     try:
                         for attempt in range(MAX_RETRIES):
                             try:
-                                logger.info(f"Navigating to {BASE_URL}/aqi for {date_str}, attempt {attempt+1}")
+                                logger.debug(f"Navigating to {BASE_URL}/aqi for {date_str}, attempt {attempt+1}")
                                 await page.goto(BASE_URL + "/aqi", wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT * 1000)
                                 break
                             except Exception as e:

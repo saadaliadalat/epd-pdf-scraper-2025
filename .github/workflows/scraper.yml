@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # Enables push for GITHUB_TOKEN
+  contents: write
 
 jobs:
   scrape:
