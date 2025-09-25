@@ -1,0 +1,34 @@
+name: EPD PDF Scraper 2025
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'  # Every 3 hours
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install aiohttp playwright pypdf psutil aiosmtplib
+          playwright install --with-deps chromium
+      - name: Run scraper
+        run: python scraper.py
+        env:
+          EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
+      - name: Commit and push
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git pull --rebase origin main
+          git add downloads2019/pdfs/*
+          git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
+          git push origin main
+        env:
+          EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
