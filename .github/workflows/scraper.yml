@@ -24,7 +24,7 @@ jobs:
         run: python scraper.py
         env:
           EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
-      - name: Commit and push
+      - name: Check for PDFs and commit
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
@@ -33,8 +33,12 @@ jobs:
           git fetch origin
           git checkout main
           git reset --hard origin/main
-          git add downloaded_pdfs/pdfs/* || true
-          git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
+          if [ -d "downloaded_pdfs/pdfs" ] && [ "$(ls -A downloaded_pdfs/pdfs)" ]; then
+            git add downloaded_pdfs/pdfs/*
+            git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No changes to commit"
+          else
+            echo "No PDFs to commit"
+          fi
           git push origin main
         env:
           EPD_SCAPER_TOKEN: ${{ secrets.EPD_SCAPER_TOKEN }}
