@@ -50,7 +50,7 @@ class Config:
     MAX_CONCURRENT = 3
     
     # Browser settings
-    HEADLESS = False  # Set to True for production
+    HEADLESS = True  # Set to True for production
     BROWSER_ARGS = [
         '--no-sandbox',
         '--disable-setuid-sandbox',
