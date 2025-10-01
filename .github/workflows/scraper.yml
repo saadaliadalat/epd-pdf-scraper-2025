@@ -10,25 +10,50 @@ permissions:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
+
+      - name: Verify Python
+        shell: pwsh
         run: |
-          pip install aiohttp playwright pypdf psutil aiosmtplib
-          playwright install --with-deps chromium
+          python --version
+          Write-Host "Python executable: $(python -c 'import sys; print(sys.executable)')"
+
+      - name: Install dependencies (no-fail)
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          # install requirements; if fails the job continues
+          try {
+            pip install -r requirements.txt
+          } catch {
+            Write-Host "pip install -r requirements.txt failed, continuing"
+          }
+          # install playwright browsers via python -m to guarantee correct interpreter
+          try {
+            python -m playwright install chromium
+          } catch {
+            Write-Host "playwright install failed (already installed?), continuing"
+          }
+
       - name: Run scraper
-        run: python scraper.py
-      - name: Check for PDFs and commit
+        shell: pwsh
+        run: |
+          python scraper.py
+
+      - name: Commit new PDFs
+        shell: pwsh
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add downloaded_pdfs/pdfs/* || true
-          git commit -m "Auto: Add new EPD PDFs $(date)" || echo "No new PDFs"
-          git push origin main
+          if (Test-Path downloaded_pdfs/pdfs) {
+            git add downloaded_pdfs/pdfs/* 2>$null
+            git commit -m "Auto: Add new EPD PDFs $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -a 2>$null || Write-Host "No new PDFs"
+            git push origin main
+          } else {
+            Write-Host "No download folder present"
+          }
