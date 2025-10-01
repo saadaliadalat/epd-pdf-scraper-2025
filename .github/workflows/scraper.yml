@@ -2,8 +2,8 @@ name: EPD PDF Scraper 2025
 
 on:
   schedule:
-    - cron: '0 */3 * * *' # every 3 hours
-  workflow_dispatch:
+    - cron: '0 */3 * * *'   # runs every 3 hours
+  workflow_dispatch:         # allow manual runs
 
 permissions:
   contents: write
@@ -11,46 +11,33 @@ permissions:
 jobs:
   scrape:
     runs-on: self-hosted
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Try using system Python first
-      - name: Check Python version
-        run: |
-          echo "Using system Python if available..."
-          python --version || echo "No system Python found"
+      - name: Verify Python
+        shell: powershell
+        run: python --version
 
-      # Fallback if system Python is missing
-      - name: Setup Python (Fallback)
-        if: ${{ failure() }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Upgrade pip & install dependencies
+      - name: Install dependencies
+        shell: powershell
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp playwright pypdf psutil aiosmtplib
-          playwright install --with-deps chromium
+          pip install --upgrade aiohttp playwright pypdf psutil aiosmtplib
+          playwright install chromium
 
       - name: Run scraper
-        run: |
-          echo "Starting scraper..."
-          python scraper.py || { echo "Scraper failed"; exit 1; }
+        shell: powershell
+        run: python scraper.py
 
       - name: Commit new PDFs
+        shell: powershell
         run: |
-          echo "Checking for new PDFs..."
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          if git ls-files downloaded_pdfs/pdfs/* --error-unmatch > /dev/null 2>&1; then
-            git add downloaded_pdfs/pdfs/*
-            git commit -m "Auto: Add new EPD PDFs $(date +'%Y-%m-%d %H:%M:%S')" || echo "No new PDFs to commit"
-            git push origin main
-          else
-            echo "No PDFs found to commit"
-          fi
+          git add downloaded_pdfs/pdfs/* || echo "No PDFs"
+          git commit -m "Auto: Add new EPD PDFs $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" || echo "No new PDFs"
+          git push origin main
