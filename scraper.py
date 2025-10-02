@@ -160,10 +160,7 @@ class Database:
     
     @staticmethod
     def get_successful_downloads(date_str: str) -> Set[str]:
-        """Get filenames of successfully downloaded PDFs for a specific date.
-        
-        Returns set of filenames that have status SUCCESS or EXISTS.
-        """
+        """Get filenames of successfully downloaded PDFs for a specific date."""
         try:
             conn = sqlite3.connect(Config.DB_FILE, timeout=10)
             cursor = conn.cursor()
@@ -181,10 +178,7 @@ class Database:
     
     @staticmethod
     def get_all_successful_downloads() -> Dict[str, Set[str]]:
-        """Get all successfully downloaded PDFs grouped by date.
-        
-        Returns dict mapping date_str -> set of filenames.
-        """
+        """Get all successfully downloaded PDFs grouped by date."""
         try:
             conn = sqlite3.connect(Config.DB_FILE, timeout=10)
             cursor = conn.cursor()
@@ -324,19 +318,7 @@ async def send_email_alert(subject: str, body: str):
 async def download_file(session: aiohttp.ClientSession, url: str, 
                        filename: str, date_str: str, 
                        already_downloaded: Set[str]) -> Tuple[bool, str]:
-    """Download a PDF file with validation and retry logic.
-    
-    Args:
-        session: aiohttp session
-        url: PDF URL
-        filename: Filename to save as
-        date_str: Date string for logging
-        already_downloaded: Set of filenames already successfully downloaded for this date
-    
-    Returns:
-        Tuple of (success: bool, status: str)
-        status can be: 'DOWNLOADED', 'SKIPPED', 'FAILED', 'INVALID_PDF'
-    """
+    """Download a PDF file with validation and retry logic."""
     sanitized_filename = sanitize_filename(filename)
     filepath = Config.DOWNLOAD_FOLDER / sanitized_filename
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -383,7 +365,7 @@ async def download_file(session: aiohttp.ClientSession, url: str,
                     
                     # Validate PDF
                     if is_valid_pdf(filepath):
-                        logger.info(f"✓ Downloaded: {sanitized_filename} ({size} bytes)")
+                        logger.info(f"Downloaded: {sanitized_filename} ({size} bytes)")
                         Database.log_download(date_str, sanitized_filename, url, 
                                             'SUCCESS', size, timestamp)
                         return True, 'DOWNLOADED'
@@ -391,7 +373,7 @@ async def download_file(session: aiohttp.ClientSession, url: str,
                         filepath.unlink()
                         Database.log_download(date_str, sanitized_filename, url, 
                                             'INVALID_PDF', 0, timestamp)
-                        logger.error(f"✗ Invalid PDF: {sanitized_filename}")
+                        logger.error(f"Invalid PDF: {sanitized_filename}")
                         return False, 'INVALID_PDF'
                 
                 elif resp.status == 429:
@@ -465,17 +447,7 @@ class BrowserManager:
 async def process_date(browser_manager: BrowserManager, date_str: str, 
                       session: aiohttp.ClientSession,
                       already_downloaded: Set[str]) -> Dict[str, int]:
-    """Process a single date: search for PDFs and download new ones.
-    
-    Args:
-        browser_manager: Browser manager instance
-        date_str: Date in MM/DD/YYYY format
-        session: aiohttp session
-        already_downloaded: Set of filenames already downloaded for this date
-    
-    Returns:
-        Dict with counts: {'downloaded': int, 'skipped': int, 'failed': int}
-    """
+    """Process a single date: search for PDFs and download new ones."""
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     page = None
     counts = {'downloaded': 0, 'skipped': 0, 'failed': 0}
@@ -598,10 +570,7 @@ async def process_date(browser_manager: BrowserManager, date_str: str,
 
 # ==================== MAIN SCRAPER ====================
 async def scrape_historical(start_date: date = None, end_date: date = None):
-    """Main scraper function to process date range.
-    
-    Strategy: Process ALL dates every run, but skip only PDFs already downloaded.
-    """
+    """Main scraper function to process date range."""
     if start_date is None:
         start_date = Config.START_DATE
     if end_date is None:
@@ -698,9 +667,9 @@ Date Range: {Config.START_DATE} to {Config.END_DATE}
 Total Dates in Range: {len(all_dates)}
 
 This Run Statistics:
-  ✓ New PDFs Downloaded: {run_stats['downloaded']}
-  ↷ PDFs Skipped (already downloaded): {run_stats['skipped']}
-  ✗ Failed Downloads: {run_stats['failed']}
+  - New PDFs Downloaded: {run_stats['downloaded']}
+  - PDFs Skipped (already downloaded): {run_stats['skipped']}
+  - Failed Downloads: {run_stats['failed']}
 
 Database Totals (All Time):
   - Total Successful Downloads: {db_stats['successful']}
@@ -732,7 +701,8 @@ async def main():
         run_stats = await scrape_historical()
         summary = generate_summary(start_time, run_stats)
         
-        print("\n" + summary + "\n")
+        # Ensure console output
+        print("\n" + summary + "\n", flush=True)
         
         # Save summary to file
         with open(Config.SUMMARY_FILE, 'w', encoding='utf-8') as f:
