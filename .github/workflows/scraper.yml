@@ -42,7 +42,11 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           if (Test-Path downloaded_pdfs/pdfs) {
             git add downloaded_pdfs/pdfs/* 2>$null
-            git commit -m "Auto: Add new EPD PDFs $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -a 2>$null || Write-Host "No new PDFs"
+            try {
+              git commit -m "Auto: Add new EPD PDFs $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -a 2>$null
+            } catch {
+              Write-Host "No new PDFs"
+            }
             git push origin main
           } else {
             Write-Host "No download folder present"
