@@ -18,35 +18,25 @@ jobs:
           fetch-depth: 0
 
       - name: Verify Python
-        shell: pwsh
+        shell: powershell
         run: |
           python --version
           Write-Host "Python executable: $(python -c 'import sys; print(sys.executable)')"
 
       - name: Install dependencies (no-fail)
-        shell: pwsh
+        shell: powershell
         run: |
           python -m pip install --upgrade pip
-          # install requirements; if fails the job continues
-          try {
-            pip install -r requirements.txt
-          } catch {
-            Write-Host "pip install -r requirements.txt failed, continuing"
-          }
-          # install playwright browsers via python -m to guarantee correct interpreter
-          try {
-            python -m playwright install chromium
-          } catch {
-            Write-Host "playwright install failed (already installed?), continuing"
-          }
+          pip install -r requirements.txt || Write-Host "pip install -r requirements.txt failed, continuing"
+          python -m playwright install chromium || Write-Host "playwright install failed (already installed?), continuing"
 
       - name: Run scraper
-        shell: pwsh
+        shell: powershell
         run: |
           python scraper.py
 
       - name: Commit new PDFs
-        shell: pwsh
+        shell: powershell
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
